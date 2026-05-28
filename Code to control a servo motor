@@ -1,0 +1,41 @@
+import machine
+import utime
+
+AZIMUTH_PIN = 16
+ELEVATION_PIN = 17
+
+PWM_FREQ = 50
+MIN_US = 500
+MAX_US = 2500
+
+az_pwm = machine.PWM(machine.Pin(AZIMUTH_PIN))
+az_pwm.freq(PWM_FREQ)
+
+el_pwm = machine.PWM(machine.Pin(ELEVATION_PIN))
+el_pwm.freq(PWM_FREQ)
+
+def get_pulse_width(angle):
+    if angle < 0:
+        angle = 0
+    elif angle > 180:
+        angle = 180
+        
+    pulse_us = MIN_US + (angle / 180.0) * (MAX_US - MIN_US)
+    return int(pulse_us * 1000)
+
+def track_satellite(azimuth, elevation):
+    try:
+        az_pwm.duty_ns(get_pulse_width(azimuth))
+        el_pwm.duty_ns(get_pulse_width(elevation))
+        print("Target locked - Az:", azimuth, "El:", elevation)
+    except Exception as error:
+        print("Hardware error:", error)
+
+print("Antenna tracking system online.")
+
+while True:
+    current_az = 45.0
+    current_el = 30.0
+    
+    track_satellite(current_az, current_el)
+    utime.sleep(2)
