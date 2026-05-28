@@ -1,0 +1,127 @@
+# main.py - Pico W MicroPython example to get LEO satellite location (az/el)
+import network
+import time
+import urequests as requests
+import ujson as json
+import math
+
+# --- User config: replace these ---
+WIFI_SSID = "YOUR_SSID"
+WIFI_PASS = "YOUR_PASS"
+N2YO_API_KEY = "YOUR_N2YO_API_KEY"  # get from https://www.n2yo.com
+NORAD_ID = 25544  # example: ISS
+OBS_LAT = 40.0     # observer latitude (deg)
+OBS_LON = -74.0    # observer longitude (deg)
+OBS_ALT = 10       # observer altitude (meters)
+SECS = 1           # number of seconds of positions to request (1 returns current)
+# -----------------------------------
+
+def connect_wifi(ssid, password, timeout=15):
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    if not wlan.isconnected():
+        wlan.connect(ssid, password)
+        t0 = time.time()
+        while not wlan.isconnected():
+            if time.time() - t0 > timeout:
+                raise RuntimeError("WiFi connect timeout")
+            time.sleep(0.5)
+    return wlan.ifconfig()
+
+def n2yo_positions(api_key, norad_id, lat, lon, alt, seconds=1):
+    url = ("https://api.n2yo.com/rest/v1/satellite/positions/"
+           "{}/{}/{}/{}/{}/?apiKey={}").format(norad_id, lat, lon, alt, seconds, api_key)
+    resp = requests.get(url)
+    if resp.status_code != 200:
+        raise RuntimeError("N2YO request failed: {}".format(resp.status_code))
+    data = resp.json()
+    resp.close()
+    return data
+
+# WGS84 constants for ECEF conversion
+a = 6378137.0
+f = 1 / 298.257223563
+e2 = f * (2 - f)
+
+def geodetic_to_ecef(lat_deg, lon_deg, alt_m):
+    lat = math.radians(lat_deg)
+    lon = math.radians(lon_deg)
+    N = a / math.sqrt(1 - e2 * (math.sin(lat) ** 2))
+    x = (N + alt_m) * math.cos(lat) * math.cos(lon)
+    y = (N + alt_m) * math.cos(lat) * math.sin(lon)
+    z = (N * (1 - e2) + alt_m) * math.sin(lat)
+    return x, y, z
+
+def ecef_to_enu(sat_ecef, obs_ecef, obs_lat_deg, obs_lon_deg):
+    dx = sat_ecef[0] - obs_ecef[0]
+    dy = sat_ecef[1] - obs_ecef[1]
+    dz = sat_ecef[2] - obs_ecef[2]
+    lat = math.radians(obs_lat_deg)
+    lon = math.radians(obs_lon_deg)
+    sin_lat = math.sin(lat)
+    cos_lat = math.cos(lat)
+    sin_lon = math.sin(lon)
+    cos_lon = math.cos(lon)
+    # East
+    east = -sin_lon * dx + cos_lon * dy
+    # North
+    north = -sin_lat * cos_lon * dx - sin_lat * sin_lon * dy + cos_lat * dz
+    # Up
+    up = cos_lat * cos_lon * dx + cos_lat * sin_lon * dy + sin_lat * dz
+    return east, north, up
+
+def enu_to_az_el(east, north, up):
+    horiz_dist = math.sqrt(east * east + north * north)
+    az = math.degrees(math.atan2(east, north))
+    if az < 0:
+        az += 360.0
+    el = math.degrees(math.atan2(up, horiz_dist))
+    return az, el
+
+def sat_geo_to_az_el(sat_lat, sat_lon, sat_alt_km, obs_lat, obs_lon, obs_alt_m):
+    sat_ecef = geodetic_to_ecef(sat_lat, sat_lon, sat_alt_km * 1000.0)
+    obs_ecef = geodetic_to_ecef(obs_lat, obs_lon, obs_alt_m)
+    e, n, u = ecef_to_enu(sat_ecef, obs_ecef, obs_lat, obs_lon)
+    az, el = enu_to_az_el(e, n, u)
+    return az, el, math.sqrt(e*e + n*n + u*u)
+
+def pretty_print_pos(pos):
+    ts = pos.get("timestamp", pos.get("sat_timestamp", 0))
+    lat = pos.get("satlatitude") or pos.get("satlat") or pos.get("sat_LAT")
+    lon = pos.get("satlongitude") or pos.get("satlon") or pos.get("sat_LON")
+    alt = pos.get("sataltitude") or pos.get("satalt") or pos.get("sat_ALT")
+    return ts, lat, lon, alt
+
+def main():
+    print("Connecting to WiFi...")
+    try:
+        print("IP:", connect_wifi(WIFI_SSID, WIFI_PASS))
+    except Exception as e:
+        print("WiFi failed:", e)
+        return
+
+    print("Querying N2YO for satellite positions...")
+    try:
+        data = n2yo_positions(N2YO_API_KEY, NORAD_ID, OBS_LAT, OBS_LON, OBS_ALT, SECS)
+    except Exception as e:
+        print("API error:", e)
+        return
+
+    # N2YO returns 'positions' list; use first/current
+    positions = data.get("positions") or data.get("pos") or []
+    if not positions:
+        print("No positions returned")
+        return
+
+    pos = positions[0]
+    ts, satlat, satlon, satalt = pretty_print_pos(pos)
+    print("Satellite at time:", ts)
+    print("Lat:", satlat, "Lon:", satlon, "Alt (km):", satalt)
+
+    az, el, rng_m = sat_geo_to_az_el(satlat, satlon, satalt, OBS_LAT, OBS_LON, OBS_ALT)
+    print("Azimuth: {:.2f} deg".format(az))
+    print("Elevation: {:.2f} deg".format(el))
+    print("Range: {:.0f} m".format(rng_m))
+
+if __name__ == "__main__":
+    main()
